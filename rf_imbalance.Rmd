@@ -1,0 +1,1060 @@
+---
+title: "Untitled"
+author: "Buse Baltacıoğlu"
+date: "01 06 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+#Veri setini iÃ§e aktarma
+
+
+```{r}
+library(readr)
+data1 <- read_csv("C:/Users/Casper/Desktop/DSM 5097 Dönem Projesi/train.csv", 
+     col_types = cols(id = col_skip(), 
+                      education = col_skip(),
+                      sex = col_factor(levels = c("F","M")),
+                      is_smoking = col_factor(levels = c("YES","NO")),
+                      prevalentStroke = col_factor(levels = c("0","1")),
+                      prevalentHyp = col_factor(levels = c("0","1")),
+                      diabetes = col_factor(levels = c("0","1")),
+                      TenYearCHD = col_factor(levels = c("0","1"))))
+data1$BPMeds<-as.factor(data1$BPMeds)
+```
+##Veri seti kayÄ±p deÄŸer kontrolÃ¼
+
+```{r}
+library(funModeling)
+View(df_status(data1))
+describe(data1)
+View(profiling_num(data1))
+```
+```{r}
+sapply(data1, function(x) sum(is.na(x)))
+```
+```{r}
+data1[!complete.cases(data1),]
+```
+```{r}
+unique(unlist(lapply(data1, function(x) which(is.na(x)))))
+```
+###KayÄ±p gÃ¶zlem oranÄ± hesaplama
+
+```{r}
+kdy<-function(x) {sum(is.na(x))/length(x)*100}
+apply(data1, 2, kdy)
+```
+-Ã–rneÄŸin, glucose'un %9 u kayÄ±p deÄŸerdir.
+
+```{r}
+library(imputeTS)
+library(mice)
+library(VIM)
+```
+```{r}
+aggr(data1, col=c("dodgerblue", "orange"),
+     numbers=TRUE, sortVars=TRUE, labels=names(data),
+     cex.axis=0.7, gap=3,
+     ylab=c("kayÄ±p deÄŸer histogramÄ±", "Ã¶rÃ¼ntÃ¼"))
+```
+#Mice paketi ile kayÄ±p deÄŸer atama random forest
+
+```{r}
+set.seed(2882)
+dfimp<-mice(data1, m=5, meth="rf", maxit = 25)
+summary(dfimp)
+```
+```{r}
+set.seed(2882)
+df<-complete(dfimp)
+```
+```{r}
+table(df$TenYearCHD)
+```
+```{r}
+library(tidyverse)
+CHD0<-df %>% filter(TenYearCHD==0)
+CHD1<-df %>% filter(TenYearCHD==1)
+```
+```{r}
+set.seed(2882)
+CHD<-sample(1:nrow(CHD0),(1246))
+CHD<-CHD0[CHD,]
+dim(CHD)
+```
+```{r}
+detach("package:VIM", unload = TRUE)
+```
+#TanÄ±mlayÄ±cÄ± istatistikler
+
+```{r}
+df1<-rbind(CHD, CHD1)
+summary(df1)
+```
+```{r}
+apply(df1, 2, sd)
+```
+```{r}
+attach(df1)
+df1_num<-data.frame(age,cigsPerDay,totChol,sysBP,diaBP,BMI,heartRate,glucose)
+df1_scale<-scale(df1_num)
+detach(df1)
+```
+```{r}
+df1<-data.frame(df1_scale, df1[,-c(1,4,9:14)])
+GGally::ggcorr(df1_scale, palette = "RdBu", label = TRUE)
+```
+```{r}
+boxplot(df1_scale, horizontal = T)
+```
+#%30 Test - %70 train
+
+```{r}
+set.seed(2882)
+train_df<-sample(1:nrow(df1),(length(df1$age)*.7))
+trainn<-df1[train_df,]
+testt<-df1[-train_df,]
+dim(trainn)
+dim(testt)
+```
+##1. SÄ±nÄ±flandÄ±rma AÄŸacÄ± (CT)
+
+```{r}
+library(tree)
+set.seed(2882)
+Ct1<-tree(trainn$TenYearCHD~., data=trainn)
+summary(Ct1)
+```
+Terminal node sayÄ±sÄ± 4, artÄ±klarÄ±n ortalamadan sapmasÄ± yaklaÅŸÄ±k 0.79 ve accuracy=0.75
+
+```{r}
+plot(Ct1)
+text(Ct1,pretty=0,cex=0.7)
+```
+OluÅŸan aÄŸaca baktÄ±ÄŸÄ±mÄ±zda gereksiz dallanmalar olduÄŸu gÃ¶rÃ¼lmekte bu sebepten dolayÄ± budamamÄ±z gerekir.
+
+```{r}
+set.seed(2882)
+(cv_tree1<-cv.tree(Ct1))
+```
+```{r}
+par(mfrow=c(1,2))
+plot(cv_tree1$size ,cv_tree1$dev, type="b")
+plot(cv_tree1$k, cv_tree1$dev, type="b")
+```
+GrafiÄŸe baktÄ±ÄŸÄ±mÄ±zda 2-5 denenmeli diyebiliriz.
+
+```{r}
+prune_ctree1<-prune.tree(Ct1, best=5)
+summary(prune_ctree1)
+```
+Terminal node sayÄ±sÄ± 3, artÄ±klarÄ±n ortalamadan sapmasÄ± %81 ve accuracy=75
+
+```{r}
+plot(prune_ctree1)
+text(prune_ctree1)
+```
+```{r}
+library(ModelMetrics)
+library(ROCR)
+```
+```{r}
+ct1_pred_train<-(predict(prune_ctree1, newdata = trainn, type = "class"))
+ct1_pred_test<-(predict(prune_ctree1, newdata = testt, type = "class"))
+
+table(ct1_pred_train)
+```
+-SÄ±nÄ±flandÄ±rma hatasÄ±
+
+```{r}
+(ct1_ce_train<-ce(trainn$TenYearCHD, ct1_pred_train))
+(ct1_ce_test<-ce(testt$TenYearCHD, ct1_pred_test))
+```
+-F1 score
+
+```{r}
+(ct1_f1_train<-f1Score(trainn$TenYearCHD, ct1_pred_train))
+(ct1_f1_test<-f1Score(testt$TenYearCHD, ct1_pred_test))
+```
+-MSE
+
+```{r}
+(ct1_mse_train<-mse(trainn$TenYearCHD, ct1_pred_train))
+(ct1_mse_test<-mse(testt$TenYearCHD, ct1_pred_test))
+```
+-Accuracy
+
+```{r}
+(ct1_acc_train<-yardstick::accuracy_vec(trainn$TenYearCHD, ct1_pred_train))
+(ct1_acc_test<-yardstick::accuracy_vec(testt$TenYearCHD, ct1_pred_test))
+```
+-Sens
+
+```{r}
+(ct1_sens_train<-yardstick::sens_vec(trainn$TenYearCHD, ct1_pred_train))
+(ct1_sens_test<-yardstick::sens_vec(testt$TenYearCHD, ct1_pred_test))
+```
+-Spec
+
+```{r}
+(ct1_spec_train<-yardstick::specificity_vec(trainn$TenYearCHD, ct1_pred_train))
+(ct1_spec_test<-yardstick::specificity_vec(testt$TenYearCHD, ct1_pred_test))
+```
+```{r}
+pr_ct1<-prediction(as.numeric(ct1_pred_test), testt$TenYearCHD)
+prf_ct1<-performance(pr_ct1, measure = "tpr", x.measure = "fpr")
+```
+```{r}
+auc_ct1 <- performance(pr_ct1, measure = "auc")
+auc_ct1 <- auc_ct1@y.values[[1]]
+auc_ct1
+```
+```{r}
+plot(prf_ct1, col="green")
+abline(0,1)
+```
+##2. Bagging ile sÄ±nÄ±flandÄ±rma aÄŸacÄ± (BCT)
+
+```{r}
+library(randomForest)
+```
+```{r}
+set.seed(2882)
+Bct1<-randomForest(trainn$TenYearCHD~., data = trainn, mtry=14, importance=TRUE)
+Bct1
+```
+```{r}
+bct1_pred_train<-predict(Bct1, newdata = trainn, type = "class")
+bct1_pred_test<-predict(Bct1, newdata = testt, type = "class")
+```
+-SÄ±nÄ±flandÄ±rma hatasÄ±
+
+```{r}
+(bct1_ce_train<-ce(trainn$TenYearCHD, bct1_pred_train))
+(bct1_ce_test<-ce(testt$TenYearCHD, bct1_pred_test))
+```
+-F1 score
+
+```{r}
+(bct1_f1_train<-f1Score(trainn$TenYearCHD, bct1_pred_train))
+(bct1_f1_test<-f1Score(testt$TenYearCHD, bct1_pred_test))
+```
+-MSE
+
+```{r}
+(bct1_mse_train<-mse(trainn$TenYearCHD, bct1_pred_train))
+(bct1_mse_test<-mse(testt$TenYearCHD, bct1_pred_test))
+```
+-Accuracy
+
+```{r}
+(bct1_acc_train<-yardstick::accuracy_vec(trainn$TenYearCHD, bct1_pred_train))
+(bct1_acc_test<-yardstick::accuracy_vec(testt$TenYearCHD, bct1_pred_test))
+```
+-Sens
+
+```{r}
+(bct1_sens_train<-yardstick::sens_vec(trainn$TenYearCHD, bct1_pred_train))
+(bct1_sens_test<-yardstick::sens_vec(testt$TenYearCHD, bct1_pred_test))
+```
+-Spec
+
+```{r}
+(bct1_spec_train<-yardstick::specificity_vec(trainn$TenYearCHD, bct1_pred_train))
+(bct1_spec_test<-yardstick::specificity_vec(testt$TenYearCHD, bct1_pred_test))
+```
+```{r}
+pr_bag1<-prediction(as.numeric(bct1_pred_test), testt$TenYearCHD)
+prf_bag1<-performance(pr_bag1, measure = "tpr", x.measure = "fpr")
+```
+```{r}
+auc_bag1<-performance(pr_bag1, measure = "auc")
+auc_bag1<-auc_bag1@y.values[[1]]
+auc_bag1
+```
+```{r}
+plot(prf_bag1, col="pink")
+abline(0,1)
+```
+```{r}
+Bct1$importance
+varImpPlot(Bct1)
+```
+##3. Rassal Ormanlar ile SÄ±nÄ±flandÄ±rma AÄŸacÄ± (RF)
+
+```{r}
+round(sqrt(length(trainn)-1),0)
+```
+```{r}
+set.seed(2882)
+Rf1<-randomForest(trainn$TenYearCHD~., data = trainn, mtry = 4, importance = TRUE)
+Rf1
+```
+```{r}
+rf1_pred_train<-predict(Rf1, newdata = trainn, type = "class")
+rf1_pred_test<-predict(Rf1, newdata = testt, type = "class")
+```
+-SÄ±nÄ±flandÄ±rma hatasÄ±
+
+```{r}
+(rf1_ce_train<-ce(trainn$TenYearCHD, rf1_pred_train))
+(rf1_ce_test<-ce(testt$TenYearCHD, rf1_pred_test))
+```
+-F1 score
+
+```{r}
+(rf1_f1_train<-f1Score(trainn$TenYearCHD, rf1_pred_train))
+(rf1_f1_test<-f1Score(testt$TenYearCHD, rf1_pred_test))
+```
+-MSE
+
+```{r}
+(rf1_mse_train<-mse(trainn$TenYearCHD, rf1_pred_train))
+(rf1_mse_test<-mse(testt$TenYearCHD, rf1_pred_test))
+```
+-Accuracy
+
+```{r}
+(rf1_acc_train<-yardstick::accuracy_vec(trainn$TenYearCHD, rf1_pred_train))
+(rf1_acc_test<-yardstick::accuracy_vec(testt$TenYearCHD, rf1_pred_test))
+```
+-Sens
+
+```{r}
+(rf1_sens_train<-yardstick::sens_vec(trainn$TenYearCHD, rf1_pred_train))
+(rf1_sens_test<-yardstick::sens_vec(testt$TenYearCHD, rf1_pred_test))
+```
+-Spec
+
+```{r}
+(rf1_spec_train<-yardstick::specificity_vec(trainn$TenYearCHD, rf1_pred_train))
+(rf1_spec_test<-yardstick::specificity_vec(testt$TenYearCHD, rf1_pred_test))
+```
+```{r}
+pr_rf1<-prediction(as.numeric(rf1_pred_test), testt$TenYearCHD)
+prf_rf1<-performance(pr_rf1, measure = "tpr", x.measure = "fpr")
+```
+```{r}
+auc_rf1<-performance(pr_rf1, measure = "auc")
+auc_rf1<-auc_rf1@y.values[[1]]
+auc_rf1
+```
+```{r}
+plot(prf_rf1, col="purple")
+abline(0,1)
+```
+```{r}
+importance(Rf1)
+varImpPlot(Rf1)
+```
+##4. Lojistik Regresyon (LR)
+
+```{r}
+Lr1<-glm(trainn$TenYearCHD~.,family=binomial, data=trainn) 
+summary(Lr1)
+```
+```{r}
+library(MASS)
+step_reg<-stepAIC(Lr1)
+step_reg$anova
+```
+```{r}
+attach(trainn)
+lr1<-glm(TenYearCHD~age+cigsPerDay+sysBP+glucose+sex, data = trainn, family = "binomial")
+detach(trainn)
+summary(lr1)
+```
+```{r}
+lr1_pred_train<-predict(lr1, newdata = trainn, type = "response")
+summary(lr1_pred_train)
+
+i=0
+for (i in seq(0.05,1,0.005)) {
+  pred_tr<-ifelse(lr1_pred_train<=i,0,1)
+  tab<-table(trainn$TenYearCHD, pred_tr) 
+  acc<-sum(diag(tab))/sum(tab)
+  print(paste(paste(acc, i)))
+}
+```
+0.51-0.515-0.525
+
+```{r}
+lr1_pred_test<-predict(lr1, newdata = testt, type = "response")
+summary(lr1_pred_test)
+
+i=0
+for (i in seq(0.05,1,0.005)) {
+  pred_te<-ifelse(lr1_pred_test<=i,0,1)
+  tab1<-table(testt$TenYearCHD, pred_te) 
+  acc1<-sum(diag(tab1))/sum(tab1)
+  print(paste(paste((acc1), i)))
+}
+```
+```{r}
+lr1_pred_train<-ifelse(lr1_pred_train<=0.51,0,1)
+lr1_pred_test<-ifelse(lr1_pred_test<=0.51,0,1)
+
+table(lr1_pred_train)
+table(lr1_pred_test)
+```
+-SÄ±nÄ±flandÄ±rma hatasÄ±
+
+```{r}
+(lr1_ce_train<-ce(trainn$TenYearCHD, lr1_pred_train))
+(lr1_ce_test<-ce(testt$TenYearCHD, lr1_pred_test))
+```
+-F1 score
+
+```{r}
+(lr1_f1_train<-f1Score(trainn$TenYearCHD, lr1_pred_train))
+(lr1_f1_test<-f1Score(testt$TenYearCHD, lr1_pred_test))
+```
+-MSE
+
+```{r}
+(lr1_mse_train<-mse(trainn$TenYearCHD, lr1_pred_train))
+(lr1_mse_test<-mse(testt$TenYearCHD, lr1_pred_test))
+```
+-Accuracy
+
+```{r}
+(lr1_acc_train<-yardstick::accuracy_vec(trainn$TenYearCHD, as.factor(lr1_pred_train)))
+(lr1_acc_test<-yardstick::accuracy_vec(testt$TenYearCHD, as.factor(lr1_pred_test)))
+```
+-Sens
+
+```{r}
+(lr1_sens_train<-yardstick::sens_vec(trainn$TenYearCHD, as.factor(lr1_pred_train)))
+(lr1_sens_test<-yardstick::sens_vec(testt$TenYearCHD, as.factor(lr1_pred_test)))
+```
+-Spec
+
+```{r}
+(lr1_spec_train<-yardstick::specificity_vec(trainn$TenYearCHD, as.factor(lr1_pred_train)))
+(lr1_spec_test<-yardstick::specificity_vec(testt$TenYearCHD, as.factor(lr1_pred_test)))
+```
+```{r}
+pr_lr1<-prediction(lr1_pred_test, testt$TenYearCHD)
+prf_lr1<-performance(pr_lr1, measure = "tpr", x.measure = "fpr")
+```
+```{r}
+auc_lr1 <- performance(pr_lr1, measure = "auc")
+auc_lr1 <- auc_lr1@y.values[[1]]
+auc_lr1
+```
+```{r}
+plot(prf_lr1, col="red")
+abline(0,1)
+```
+##5. Destek vektÃ¶r (Svm)
+###5.1 Linear
+
+```{r}
+library(e1071)
+library(SparseM)
+```
+```{r}
+costs <- seq(from=0.05, to=10, by=0.05)
+correctRate <- double(length(costs))
+misRate <- double(length(costs))
+for (c in 1:length(costs)){
+  epsilon.svr<-svm(trainn$TenYearCHD ~ .,
+                   data=trainn,
+                   gamma=1,
+                   cost=costs[c])
+
+  svm.pred<-predict(epsilon.svr, trainn[,-15])
+  classificationTable<-table(pred = svm.pred, true = trainn$TenYearCHD)
+  correctRate[c]<-sum(svm.pred==trainn$TenYearCHD)/length(trainn$TenYearCHD)
+  misRate[c]<-1-correctRate[c]
+}
+
+plot(costs, misRate, type="l")
+```
+```{r}
+k1<-which.min(misRate)
+costs[k1]
+misRate[k1]
+```
+4.85 â†' 0.0008136697
+
+```{r}
+svm1_linear<-svm(formula = trainn$TenYearCHD~.,
+                data = trainn,
+                type = "C-classification",
+                kernel = "linear",
+                cost = 4.85,
+                gamma = 1,
+                scale = TRUE)
+
+summary(svm1_linear)
+```
+```{r}
+svm1_lin_pred_train<-predict(svm1_linear, trainn[,-15])
+table(trainn$TenYearCHD, svm1_lin_pred_train)
+
+svm1_lin_pred_test<-predict(svm1_linear, testt[,-15])
+table(testt$TenYearCHD, svm1_lin_pred_test)
+```
+-SÄ±nÄ±flandÄ±rma hatasÄ±
+
+```{r}
+(svm1_lin_ce_train<-ce(trainn$TenYearCHD, svm1_lin_pred_train))
+(svm1_lin_ce_test<-ce(testt$TenYearCHD, svm1_lin_pred_test))
+```
+-F1 score
+
+```{r}
+(svm1_lin_f1_train<-f1Score(trainn$TenYearCHD, svm1_lin_pred_train))
+(svm1_lin_f1_test<-f1Score(testt$TenYearCHD, svm1_lin_pred_test))
+```
+-MSE
+
+```{r}
+(svm1_lin_mse_train<-mse(trainn$TenYearCHD, svm1_lin_pred_train))
+(svm1_lin_mse_test<-mse(testt$TenYearCHD, svm1_lin_pred_test))
+```
+-Accuracy
+
+```{r}
+(svm1_lin_acc_train<-yardstick::accuracy_vec(trainn$TenYearCHD, as.factor(svm1_lin_pred_train)))
+(svm1_lin_acc_test<-yardstick::accuracy_vec(testt$TenYearCHD, as.factor(svm1_lin_pred_test)))
+```
+-Sens
+
+```{r}
+(svm1_lin_sens_train<-yardstick::sens_vec(trainn$TenYearCHD, svm1_lin_pred_train))
+(svm1_lin_sens_test<-yardstick::sens_vec(testt$TenYearCHD, svm1_lin_pred_test))
+```
+-Spec
+
+```{r}
+(svm1_lin_spec_train<-yardstick::specificity_vec(trainn$TenYearCHD, svm1_lin_pred_train))
+(svm1_lin_spec_test<-yardstick::specificity_vec(testt$TenYearCHD, svm1_lin_pred_test))
+```
+```{r}
+pr_svm1_lin<-prediction(as.numeric(svm1_lin_pred_test), as.numeric(testt$TenYearCHD))
+prf_svm1_lin<-performance(pr_svm1_lin, measure = "tpr", x.measure = "fpr")
+```
+```{r}
+auc_svm1_lin <- performance(pr_svm1_lin, measure = "auc")
+auc_svm1_lin <- auc_svm1_lin@y.values[[1]]
+auc_svm1_lin
+```
+```{r}
+plot(prf_svm1_lin, col="red")
+abline(0,1)
+```
+###5.2 Radial
+
+```{r}
+set.seed(2882)
+svm1_radial<-svm(trainn$TenYearCHD~.,
+                data = trainn,
+                kernel = "radial",
+                type ="C-classification",
+                gamma = 0.4,
+                cost =4.85)
+summary(svm1_radial)
+```
+```{r}
+svm1_rad_pred_train<-predict(svm1_radial, trainn[,-15])
+table(trainn$TenYearCHD, svm1_rad_pred_train)
+
+svm1_rad_pred_test<-predict(svm1_radial, testt[,-15])
+table(testt$TenYearCHD, svm1_rad_pred_test)
+```
+-SÄ±nÄ±flandÄ±rma hatasÄ±
+
+```{r}
+(svm1_rad_ce_train<-ce(trainn$TenYearCHD, svm1_rad_pred_train))
+(svm1_rad_ce_test<-ce(testt$TenYearCHD, svm1_rad_pred_test))
+```
+-F1 score
+
+```{r}
+(svm1_rad_f1_train<-f1Score(trainn$TenYearCHD, svm1_rad_pred_train))
+(svm1_rad_f1_test<-f1Score(testt$TenYearCHD, svm1_rad_pred_test))
+```
+-MSE
+
+```{r}
+(svm1_rad_mse_train<-mse(trainn$TenYearCHD, svm1_rad_pred_train))
+(svm1_rad_mse_test<-mse(testt$TenYearCHD, svm1_rad_pred_test))
+```
+-Accuracy
+
+```{r}
+(svm1_rad_acc_train<-yardstick::accuracy_vec(trainn$TenYearCHD, as.factor(svm1_rad_pred_train)))
+(svm1_rad_acc_test<-yardstick::accuracy_vec(testt$TenYearCHD, as.factor(svm1_rad_pred_test)))
+```
+-Sens
+
+```{r}
+(svm1_rad_sens_train<-yardstick::sens_vec(trainn$TenYearCHD, svm1_rad_pred_train))
+(svm1_rad_sens_test<-yardstick::sens_vec(testt$TenYearCHD, svm1_rad_pred_test))
+```
+-Spec
+
+```{r}
+(svm1_rad_spec_train<-yardstick::specificity_vec(trainn$TenYearCHD, svm1_rad_pred_train))
+(svm1_rad_spec_test<-yardstick::specificity_vec(testt$TenYearCHD, svm1_rad_pred_test))
+```
+```{r}
+pr_svm1_rad<-prediction(as.numeric(svm1_rad_pred_test), as.numeric(testt$TenYearCHD))
+prf_svm1_rad<-performance(pr_svm1_rad, measure = "tpr", x.measure = "fpr")
+```
+```{r}
+auc_svm1_rad <- performance(pr_svm1_rad, measure = "auc")
+auc_svm1_rad <- auc_svm1_rad@y.values[[1]]
+auc_svm1_rad
+```
+```{r}
+plot(prf_svm1_rad, col="red")
+abline(0,1)
+```
+###5.3 Polynomial
+
+```{r}
+set.seed(2882)
+svm1_poly<-svm(trainn$TenYearCHD~.,
+              data = trainn,
+              kernel = "polynomial",
+              type ="C-classification",
+              gamma = 0.4,
+              coef0 = 3,
+              degree = 5, 
+              cost = 4.85)
+summary(svm1_poly)
+```
+```{r}
+svm1_poly_pred_train<-predict(svm1_poly, trainn[,-15])
+table(trainn$TenYearCHD, svm1_poly_pred_train)
+
+svm1_poly_pred_test<-predict(svm1_poly, testt[,-15])
+table(testt$TenYearCHD, svm1_poly_pred_test)
+```
+-SÄ±nÄ±flandÄ±rma hatasÄ±
+
+```{r}
+(svm1_poly_ce_train<-ce(trainn$TenYearCHD, svm1_poly_pred_train))
+(svm1_poly_ce_test<-ce(testt$TenYearCHD, svm1_poly_pred_test))
+```
+-F1 score
+
+```{r}
+(svm1_poly_f1_train<-f1Score(trainn$TenYearCHD, svm1_poly_pred_train))
+(svm1_poly_f1_test<-f1Score(testt$TenYearCHD, svm1_poly_pred_test))
+```
+-MSE
+
+```{r}
+(svm1_poly_mse_train<-mse(trainn$TenYearCHD, svm1_poly_pred_train))
+(svm1_poly_mse_test<-mse(testt$TenYearCHD, svm1_poly_pred_test))
+```
+-Accuracy
+
+```{r}
+(svm1_poly_acc_train<-yardstick::accuracy_vec(trainn$TenYearCHD, as.factor(svm1_poly_pred_train)))
+(svm1_poly_acc_test<-yardstick::accuracy_vec(testt$TenYearCHD, as.factor(svm1_poly_pred_test)))
+```
+-Sens
+
+```{r}
+(svm1_poly_sens_train<-yardstick::sens_vec(trainn$TenYearCHD, svm1_poly_pred_train))
+(svm1_poly_sens_test<-yardstick::sens_vec(testt$TenYearCHD, svm1_poly_pred_test))
+```
+-Spec
+
+```{r}
+(svm1_poly_spec_train<-yardstick::specificity_vec(trainn$TenYearCHD, svm1_poly_pred_train))
+(svm1_poly_spec_test<-yardstick::specificity_vec(testt$TenYearCHD, svm1_poly_pred_test))
+```
+```{r}
+pr_svm1_poly<-prediction(as.numeric(svm1_poly_pred_test), as.numeric(testt$TenYearCHD))
+prf_svm1_poly<-performance(pr_svm1_poly, measure = "tpr", x.measure = "fpr")
+```
+```{r}
+auc_svm1_poly <- performance(pr_svm1_poly, measure = "auc")
+auc_svm1_poly <- auc_svm1_poly@y.values[[1]]
+auc_svm1_poly
+```
+```{r}
+plot(prf_svm1_poly, col="red")
+abline(0,1)
+```
+##6. Xgboost
+
+```{r}
+library(xgboost)
+library(stringr)
+library(caret)
+library(car)
+library(mlr)
+```
+```{r}
+labels1<-trainn$TenYearCHD
+ts_label1<-testt$TenYearCHD
+
+new_tr1<-model.matrix(~.+0, data = trainn[,-15])
+
+new_ts1<-model.matrix(~.+0, data = testt[,-15])
+
+labels1<-as.numeric(labels1)-1
+
+ts_label1<-as.numeric(ts_label1)-1
+```
+```{r}
+dtrain1<-xgb.DMatrix(data = new_tr1, label = labels1)
+
+dtest1<-xgb.DMatrix(data = new_ts1, label = ts_label1)
+```
+```{r}
+set.seed(2882)
+params<-list(booster = "gbtree",
+             objective = "binary:logistic",
+             eta = 0.3,
+             gamma = 0,
+             max_depth = 6,
+             min_child_weight = 1,
+             subsample = 1,
+             colsample_bytree = 1)
+```
+```{r}
+set.seed(2882)
+xgbcv1<-xgb.cv(params = params, data = dtrain1,
+              nrounds = 100, nfold = 5, showsd = T,
+              stratified = T, print_every_n = 10,
+              early_stopping_rounds = 20, maximize = F)
+```
+```{r}
+xgbcv1$best_iteration
+```
+```{r}
+xgb1<-xgb.train(params = params, data = dtrain1,
+                nrounds = 8,
+                watchlist = list(val = dtest1, train = dtrain1),
+                print_every_n = 10, early_stopping_rounds = 10,
+                maximize = F, eval_metric = "error")
+```
+```{r}
+xgb1_pred_train<-predict(xgb1, newdata = dtrain1)
+xgb1_pred_test<-predict(xgb1, newdata = dtest1)
+```
+```{r}
+i=0
+for (i in seq(0.05,1,0.005)) {
+  pred<-ifelse(xgb1_pred_train<=i,0,1)
+  tab<-table(labels1, pred) 
+  acc<-sum(diag(tab))/sum(tab)
+  print(paste(paste(acc, i)))
+}
+```
+-0.465
+
+```{r}
+xgb1_pred_train<-ifelse(xgb1_pred_train<=0.465,0,1)
+xgb1_pred_test<-ifelse(xgb1_pred_test<=0.465,0,1)
+
+table(xgb1_pred_train)
+table(xgb1_pred_test)
+```
+```{r}
+detach("package:mlr", unload = TRUE)
+```
+-SÄ±nÄ±flandÄ±rma hatasÄ±
+
+```{r}
+(xgb1_ce_train<-ce(labels1, xgb1_pred_train))
+(xgb1_ce_test<-ce(ts_label1, xgb1_pred_test))
+```
+-F1 score
+
+```{r}
+(xgb1_f1_train<-f1Score(labels1, xgb1_pred_train))
+(xgb1_f1_test<-f1Score(ts_label1, xgb1_pred_test))
+```
+-MSE
+
+```{r}
+(xgb1_mse_train<-mse(labels1, xgb1_pred_train))
+(xgb1_mse_test<-mse(ts_label1, xgb1_pred_test))
+```
+-Accuracy
+
+```{r}
+(xgb1_acc_train<-yardstick::accuracy_vec(as.factor(labels1), as.factor(xgb1_pred_train)))
+(xgb1_acc_test<-yardstick::accuracy_vec(as.factor(ts_label1), as.factor(xgb1_pred_test)))
+```
+-Sens
+
+```{r}
+(xgb1_sens_train<-yardstick::sens_vec(as.factor(labels1), as.factor(xgb1_pred_train)))
+(xgb1_sens_test<-yardstick::sens_vec(as.factor(ts_label1), as.factor(xgb1_pred_test)))
+```
+-Spec
+
+```{r}
+(xgb1_spec_train<-yardstick::specificity_vec(as.factor(labels1), as.factor(xgb1_pred_train)))
+(xgb1_spec_test<-yardstick::specificity_vec(as.factor(ts_label1), as.factor(xgb1_pred_test)))
+```
+```{r}
+pr_xgb1<-prediction(xgb1_pred_test, ts_label1)
+prf_xgb1<-ROCR::performance(pr_xgb1, measure = "tpr", x.measure = "fpr")
+```
+```{r}
+auc_xgb1<-ROCR::performance(pr_xgb1, measure = "auc")
+auc_xgb1<-auc_xgb1@y.values[[1]]
+auc_xgb1
+```
+```{r}
+plot(prf_xgb1, col="purple")
+abline(0,1)
+```
+```{r}
+mat1 <- xgb.importance (feature_names = colnames(new_tr1),model = xgb1)
+xgb.plot.importance (importance_matrix = mat1[1:11])
+```
+##7. Naive bayes
+
+```{r}
+library(e1071)
+library(caret)
+library(klaR)
+```
+```{r}
+set.seed(2882)
+nb1<-train(trainn[,-15], trainn[,15], "nb",
+          trControl=trainControl(method = "cv", number = 10))
+nb1
+```
+```{r}
+nb1_pred_train<-predict(nb1, newdata = trainn, type = "raw")
+nb1_pred_test<-predict(nb1, newdata = testt, type = "raw")
+```
+-SÄ±nÄ±flandÄ±rma hatasÄ±
+
+```{r}
+(nb1_ce_train<-ce(trainn$TenYearCHD, nb1_pred_train))
+(nb1_ce_test<-ce(testt$TenYearCHD, nb1_pred_test))
+```
+-F1 score
+
+```{r}
+(nb1_f1_train<-f1Score(trainn$TenYearCHD, nb1_pred_train))
+(nb1_f1_test<-f1Score(testt$TenYearCHD, nb1_pred_test))
+```
+-MSE
+
+```{r}
+(nb1_mse_train<-mse(trainn$TenYearCHD, nb1_pred_train))
+(nb1_mse_test<-mse(testt$TenYearCHD, nb1_pred_test))
+```
+-Accuracy
+
+```{r}
+(nb1_acc_train<-yardstick::accuracy_vec(trainn$TenYearCHD, nb1_pred_train))
+(nb1_acc_test<-yardstick::accuracy_vec(testt$TenYearCHD, nb1_pred_test))
+```
+-Sens
+
+```{r}
+(nb1_sens_train<-yardstick::sens_vec(trainn$TenYearCHD, nb1_pred_train))
+(nb1_sens_test<-yardstick::sens_vec(testt$TenYearCHD, nb1_pred_test))
+```
+-Spec
+
+```{r}
+(nb1_spec_train<-yardstick::specificity_vec(trainn$TenYearCHD, nb1_pred_train))
+(nb1_spec_test<-yardstick::specificity_vec(testt$TenYearCHD, nb1_pred_test))
+```
+```{r}
+pr_nb1<-prediction(as.numeric(nb1_pred_test), testt$TenYearCHD)
+prf_nb1<-performance(pr_nb1, measure = "tpr", x.measure = "fpr")
+```
+```{r}
+auc_nb1<-performance(pr_nb1, measure = "auc")
+auc_nb1<-auc_nb1@y.values[[1]]
+auc_nb1
+```
+```{r}
+plot(prf_nb1, col="purple")
+abline(0,1)
+```
+##8. kNN
+
+```{r}
+library(class)
+```
+```{r}
+attach(trainn)
+train.x1<-data.frame(age, cigsPerDay, totChol, sysBP, diaBP, BMI, heartRate,
+                    glucose, as.integer(sex), as.integer(is_smoking),
+                      as.integer(BPMeds),as.integer(prevalentStroke),
+                    as.integer(prevalentHyp), as.integer(diabetes))
+
+train.y1<-data.frame(as.integer(TenYearCHD))
+detach(trainn)
+```
+```{r}
+attach(testt)
+test.x1<-data.frame(age, cigsPerDay, totChol, sysBP, diaBP, BMI, heartRate,
+                    glucose, as.integer(sex), as.integer(is_smoking),
+                      as.integer(BPMeds),as.integer(prevalentStroke),
+                    as.integer(prevalentHyp), as.integer(diabetes))
+test.y1<-data.frame(as.integer(TenYearCHD))
+detach(testt)
+```
+```{r}
+set.seed(2882)
+i=1
+k.optm=1
+for (i in 1:100){
+  knn.mod <- knn(train=train.x1, test=test.x1, cl=trainn[,15], k=i)
+  k.optm[i] <- 100 * sum(testt[,15] == knn.mod)/NROW(testt[,15])
+  k=i
+  cat(k,'=',k.optm[i],'')
+}
+```
+```{r}
+plot(k.optm, type="b", xlab="K- Value",ylab="Accuracy level")
+```
+```{r}
+max(k.optm)
+which.max(k.optm)
+```
+```{r}
+set.seed(2882)
+knn1<-knn(train = train.x1, test = test.x1, cl = trainn[,15], k = 22)
+```
+```{r}
+table(knn1, testt[,15])
+```
+-SÄ±nÄ±flandÄ±rma hatasÄ±
+
+```{r}
+(knn1_ce_test<-ce(testt$TenYearCHD, knn1))
+```
+-F1 score
+
+```{r}
+(knn1_f1_test<-f1Score(testt$TenYearCHD, knn1))
+```
+-MSE
+
+```{r}
+(knn1_mse_test<-mse(testt$TenYearCHD, knn1))
+```
+-Accuracy
+
+```{r}
+(knn1_acc_test<-yardstick::accuracy_vec(testt$TenYearCHD, knn1))
+```
+-Sens
+
+```{r}
+(knn1_sens_test<-yardstick::sens_vec(testt$TenYearCHD, knn1))
+```
+-Spec
+
+```{r}
+(knn1_spec_test<-yardstick::specificity_vec(testt$TenYearCHD, knn1))
+```
+```{r}
+pr_knn1<-prediction(as.numeric(knn1), testt$TenYearCHD)
+prf_knn1<-performance(pr_knn1, measure = "tpr", x.measure = "fpr")
+```
+```{r}
+auc_knn1<-performance(pr_knn1, measure = "auc")
+auc_knn1<-auc_knn1@y.values[[1]]
+auc_knn1
+```
+```{r}
+plot(prf_knn1, col="orange")
+abline(0,1)
+```
+
+## 9. KarÅŸÄ±laÅŸtÄ±rma
+
+```{r}
+acc1_train<-rbind(ct1_acc_train, bct1_acc_train, rf1_acc_train, lr1_acc_train, svm1_lin_acc_train, svm1_rad_acc_train,svm1_poly_acc_train,xgb1_acc_train,nb1_acc_train)
+
+
+mse1_train<-rbind(ct1_mse_train, bct1_mse_train, rf1_mse_train, lr1_mse_train, svm1_lin_mse_train,svm1_rad_mse_train, svm1_poly_mse_train,xgb1_mse_train, nb1_mse_train)
+
+
+f11_train<-rbind(ct1_f1_train, bct1_f1_train, rf1_f1_train, lr1_f1_train, svm1_lin_f1_train, svm1_rad_f1_train, svm1_poly_f1_train, xgb1_f1_train, nb1_f1_train)
+
+
+sens1_train<-rbind(ct1_sens_train, bct1_sens_train, rf1_sens_train, lr1_sens_train, svm1_lin_sens_train, svm1_rad_sens_train, svm1_poly_sens_train, xgb1_sens_train, nb1_sens_train)
+
+
+spec1_train<-rbind(ct1_spec_train, bct1_spec_train, rf1_spec_train, lr1_spec_train, svm1_lin_spec_train, svm1_rad_spec_train, svm1_poly_spec_train, xgb1_spec_train, nb1_spec_train)
+
+
+ce1_train<-rbind(ct1_ce_train, bct1_ce_train, rf1_ce_train, lr1_ce_train, svm1_lin_ce_train, svm1_rad_ce_train, svm1_poly_ce_train, xgb1_ce_train, nb1_ce_train)
+
+
+snc1_train<-data.frame(ce1_train, mse1_train, f11_train, sens1_train, spec1_train, acc1_train)
+
+
+colnames(snc1_train)<-c("ce", "mse", "f1", "sens", "spec", "acc")
+rownames(snc1_train)<-c("ct","bag","rf","lr","svm_linear","svm_radial","svm_poly", "xgboost","naive bayes")
+View(snc1_train)
+```
+```{r}
+auc1<-rbind(auc_ct1,auc_bag1,auc_rf1,auc_lr1,auc_svm1_lin,auc_svm1_rad,auc_svm1_poly, auc_xgb1, auc_nb1, auc_knn1)
+
+acc1<-rbind(ct1_acc_test, bct1_acc_test, rf1_acc_test, lr1_acc_test, 
+            svm1_lin_acc_test, svm1_rad_acc_test,svm1_poly_acc_test,xgb1_acc_test ,nb1_acc_test, knn1_acc_test)
+
+mse1<-rbind(ct1_mse_test, bct1_mse_test, rf1_mse_test, lr1_mse_test,
+            svm1_lin_mse_test,svm1_rad_mse_test, svm1_poly_mse_test, xgb1_mse_test, nb1_mse_test, knn1_mse_test)
+
+f11<-rbind(ct1_f1_test, bct1_f1_test, rf1_f1_test, lr1_f1_test, svm1_lin_f1_test,
+           svm1_rad_f1_test, svm1_poly_mse_test, xgb1_f1_test, nb1_f1_test, knn1_f1_test)
+
+sens1<-rbind(ct1_sens_test, bct1_sens_test, rf1_sens_test, lr1_sens_test, 
+             svm1_lin_sens_test, svm1_rad_sens_test, svm1_poly_sens_test, xgb1_sens_test,
+             nb1_sens_test,
+             knn1_sens_test)
+
+spec1<-rbind(ct1_spec_test, bct1_spec_test, rf1_spec_test, lr1_spec_test, svm1_lin_spec_test,
+             svm1_rad_spec_test, svm1_poly_spec_test, xgb1_spec_test, nb1_spec_test, knn1_spec_test)
+
+ce1<-rbind(ct1_ce_test, bct1_ce_test, rf1_ce_test, lr1_ce_test, svm1_lin_ce_test, 
+           svm1_rad_ce_test, svm1_poly_ce_test, xgb1_ce_test, nb1_ce_test, knn1_ce_test)
+
+snc1<-data.frame(ce1, mse1, f11, sens1, spec1, acc1, auc1)
+colnames(snc1)<-c("ce", "mse", "f1", "sens", "spec", "acc", "auc")
+rownames(snc1)<-c("ct","bag","rf","lr","svm_linear","svm_radial","svm_poly", "xgboost", "naive bayes", "knn")
+View(snc1)
+```
+```{r}
+plot(prf_ct1, col="green")
+plot(prf_bag1, col="pink", add=T)
+plot(prf_rf1, col="purple", add=T)
+plot(prf_lr1, col="red", add=T)
+plot(prf_svm1_lin, col="yellow", add=T)
+plot(prf_svm1_rad, col="lightblue", add=T)
+plot(prf_svm1_poly, col="darkblue", add=T)
+plot(prf_knn1, col="orange", add=T)
+plot(prf_nb1, col="black", add=T)
+plot(prf_xgb1, col="brown", add=T)
+abline(0,1)
+
+```
+
+rf.imbalance.1246
+
+
+
+
+
+
+
